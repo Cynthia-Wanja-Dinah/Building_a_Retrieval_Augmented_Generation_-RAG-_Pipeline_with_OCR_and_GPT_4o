@@ -1,0 +1,498 @@
+{
+  "nbformat": 4,
+  "nbformat_minor": 0,
+  "metadata": {
+    "colab": {
+      "provenance": []
+    },
+    "kernelspec": {
+      "name": "python3",
+      "display_name": "Python 3"
+    },
+    "language_info": {
+      "name": "python"
+    }
+  },
+  "cells": [
+    {
+      "cell_type": "markdown",
+      "source": [
+        "## **Building a Retrieval-Augmented Generation (RAG) Pipeline with OCR and GPT-4o**\n",
+        "\n",
+        "This tutorial walks through the process of building a **Retrieval-Augmented Generation (RAG)** system for PDFs, using **Optical Character Recognition (OCR)** and GPT-4o to extract and summarize text. We will leverage LangChain for document retrieval, Chroma for embeddings, and OpenAI models for summarization and query-answering.\n",
+        "\n",
+        "### **Prerequisites**\n",
+        "Before starting, ensure you have the following packages installed in your Google Colab environment:"
+      ],
+      "metadata": {
+        "id": "HpSbaN9PMwVL"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "!pip install pytesseract Pillow openai==0.28 matplotlib langchain chromadb PyPDF2 pdf2image langchain_community tiktoken\n",
+        "!sudo apt-get install tesseract-ocr\n",
+        "!apt-get install -y poppler-utils"
+      ],
+      "metadata": {
+        "id": "kC2Oo7yBOrG3"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "These packages include:\n",
+        "- `pytesseract` for OCR,\n",
+        "- `Pillow` for image manipulation,\n",
+        "- `openai` for GPT-4o API access,\n",
+        "- `matplotlib` for visualizing PDF page images,\n",
+        "- `LangChain` and `Chroma` for text processing and document retrieval.\n",
+        "\n",
+        "### **Step 1: Setup Environment**\n",
+        "First, we need to import the necessary libraries and load environment variables for accessing OpenAI's API."
+      ],
+      "metadata": {
+        "id": "gvBVEBctOiUy"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "import os\n",
+        "import openai\n",
+        "import pytesseract\n",
+        "from PIL import Image\n",
+        "import io\n",
+        "import matplotlib.pyplot as plt\n",
+        "from pdf2image import convert_from_path\n",
+        "from PyPDF2 import PdfReader\n",
+        "from langchain.vectorstores import Chroma\n",
+        "from langchain.docstore.document import Document\n",
+        "from langchain.embeddings.openai import OpenAIEmbeddings\n",
+        "from langchain.text_splitter import RecursiveCharacterTextSplitter\n",
+        "from langchain.prompts import ChatPromptTemplate\n",
+        "from langchain.chains import LLMChain\n",
+        "from langchain.chat_models import ChatOpenAI\n",
+        "from langchain_core.output_parsers import StrOutputParser\n",
+        "from dotenv import load_dotenv\n",
+        "\n",
+        "load_dotenv()  # Ensure .env contains OPENAI_API_KEY"
+      ],
+      "metadata": {
+        "id": "hu3S3OGAOln8"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 2: Download and Load PDF**\n",
+        "We use a sample PDF, **Attention is All You Need**. The following code downloads the PDF:"
+      ],
+      "metadata": {
+        "id": "Z5kQqRa6OYYs"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "!wget https://arxiv.org/pdf/1706.03762\n",
+        "!mv 1706.03762 attention_is_all_you_need.pdf"
+      ],
+      "metadata": {
+        "id": "mRCZrv4pOaQO"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "We’ll use PyPDF2 to extract the text from the PDF pages.\n",
+        "\n",
+        "### **Step 3: Text Extraction from PDF and Images**\n",
+        "We extract text directly from the PDF or convert the pages to images for OCR.\n",
+        "\n",
+        "#### **3.1 Extract Text from PDF**"
+      ],
+      "metadata": {
+        "id": "goP1W-vSOQPz"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def extract_text_from_pdf(pdf_path):\n",
+        "    reader = PdfReader(pdf_path)\n",
+        "    text = \"\"\n",
+        "    for page in reader.pages:\n",
+        "        text += page.extract_text()\n",
+        "    return text"
+      ],
+      "metadata": {
+        "id": "dRzSQQCTOS-k"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "#### **3.2 Convert PDF Pages to Images**\n",
+        "For PDF pages with complex layouts, converting to images may be a better approach for text extraction using OCR."
+      ],
+      "metadata": {
+        "id": "eLhRKf9_OGg8"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def convert_pdf_to_images(pdf_path):\n",
+        "    try:\n",
+        "        images = convert_from_path(pdf_path)\n",
+        "        return images\n",
+        "    except Exception as e:\n",
+        "        print(f\"Error converting PDF to images: {e}\")\n",
+        "        return []"
+      ],
+      "metadata": {
+        "id": "g_upPzCEOJWu"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 4: Optical Character Recognition (OCR) with Tesseract**\n",
+        "Since we don’t have access to an OpenAI vision model yet, we’ll use Tesseract to extract text from the image files."
+      ],
+      "metadata": {
+        "id": "7ixt1NKpN_CL"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def extract_text_from_image(image_path):\n",
+        "    try:\n",
+        "        image = Image.open(image_path)\n",
+        "        text = pytesseract.image_to_string(image)\n",
+        "        return text\n",
+        "    except Exception as e:\n",
+        "        print(f\"Error extracting text from image: {e}\")\n",
+        "        return None"
+      ],
+      "metadata": {
+        "id": "YZy9HbOEOBQ8"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 5: Summarization with GPT-4o**\n",
+        "We can use GPT-4o to summarize the extracted text. This function also handles image metadata (for potential visual information)."
+      ],
+      "metadata": {
+        "id": "xgbf64PGN2GG"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "openai.api_key=\"Your_openai_api_key\"\n",
+        "def get_gpt4_summary(image_path, extracted_text=None):\n",
+        "    try:\n",
+        "        image = Image.open(image_path)\n",
+        "        if not extracted_text:\n",
+        "            return \"No text to summarize.\"\n",
+        "\n",
+        "        image_description = (\n",
+        "            f\"This image is in {image.format} format with a size of {image.size[0]}x{image.size[1]} pixels and {image.mode} color mode. \"\n",
+        "            f\"Extracted text from the image: {extracted_text[:500]}...\"\n",
+        "        )\n",
+        "\n",
+        "        response = openai.ChatCompletion.create(\n",
+        "            model=\"gpt-4o\",\n",
+        "            messages=[\n",
+        "                {\"role\": \"system\", \"content\": \"You are an assistant summarizing images and extracted text.\"},\n",
+        "                {\"role\": \"user\", \"content\": f\"Please summarize the following image: {image_description}\"}\n",
+        "            ]\n",
+        "        )\n",
+        "        return response['choices'][0]['message']['content']\n",
+        "\n",
+        "    except Exception as e:\n",
+        "        print(f\"Error summarizing image: {e}\")\n",
+        "        return \"Error generating summary.\""
+      ],
+      "metadata": {
+        "id": "NkbASdTBN2pR"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 6: Display Image with Summarized Text**\n",
+        "The `matplotlib` library allows us to display the image alongside the summary."
+      ],
+      "metadata": {
+        "id": "MFW6GEXMNrxB"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "def display_image_with_summary(image, summary):\n",
+        "    plt.figure(figsize=(8, 6))\n",
+        "    plt.imshow(image)\n",
+        "    plt.axis('off')\n",
+        "    plt.title(f\"Summary: {summary}\", fontsize=10, wrap=True)\n",
+        "    plt.show()"
+      ],
+      "metadata": {
+        "id": "tUsivLt6NvJ0"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 7: Processing a PDF to Extract Text and Images**\n",
+        "\n",
+        "This is focused on processing a PDF file to extract its textual content and convert its pages into images. Here's a detailed explanation of each step in the cell:"
+      ],
+      "metadata": {
+        "id": "ZbH7N8_AS0TZ"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Process the PDF and images\n",
+        "pdf_path = \"attention_is_all_you_need.pdf\"\n",
+        "pdf_text = extract_text_from_pdf(pdf_path)\n",
+        "images = convert_pdf_to_images(pdf_path)"
+      ],
+      "metadata": {
+        "id": "GmhdodmHPft6"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 8: Extracting and Summarizing Text from PDF Images Using OCR and GPT-4o**\n",
+        "\n",
+        "\n",
+        "\n",
+        "This is designed to process images extracted from a PDF, perform text extraction using Optical Character Recognition (OCR), and then summarize the extracted text using a model such as GPT-4o.\n",
+        "\n",
+        "**Key Points:**\n",
+        "\n",
+        "- **Image File Creation**: The images are saved as individual files to facilitate text extraction using OCR.\n",
+        "- **OCR Processing**: Tesseract or another OCR tool is likely used to convert image content into text.\n",
+        "- **Text Summarization**: GPT-4o is utilized to generate concise summaries of the extracted text for each page.\n",
+        "- **Feedback and Display**: Offers visual and textual output to inform the user about the results of each step in the pipeline.\n",
+        "\n",
+        "This process streamlines the conversion of PDF content into a format that is both human-readable and easy to analyze, making it especially useful for processing large documents with complex layouts in a Google Colab environment."
+      ],
+      "metadata": {
+        "id": "CMQIavVJTNF-"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "# Ensure each image is saved as a file to extract text from it\n",
+        "for i, image in enumerate(images):\n",
+        "    image_path = f\"page_{i+1}.png\"\n",
+        "    image.save(image_path, \"PNG\")\n",
+        "\n",
+        "    # Extract text from the saved image path using OCR (Tesseract)\n",
+        "    extracted_text = extract_text_from_image(image_path)\n",
+        "\n",
+        "    # Check if text extraction was successful\n",
+        "    if extracted_text:\n",
+        "        # Summarize the text using GPT-4o\n",
+        "        summary = get_gpt4_summary(image_path, extracted_text)\n",
+        "        display_image_with_summary(image, summary)\n",
+        "        print(f\"Summary for page {i+1}:\\n\", summary)\n",
+        "    else:\n",
+        "        print(f\"No text extracted from page {i+1}.\")"
+      ],
+      "metadata": {
+        "id": "5pth85bxQ0GP"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 9: Text Embedding and Retrieval**\n",
+        "Once the text is extracted and summarized, we need to split the document into smaller chunks for embedding."
+      ],
+      "metadata": {
+        "id": "ftZGSi0aNcqM"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "text_splitter = RecursiveCharacterTextSplitter(chunk_size=400, chunk_overlap=50)\n",
+        "doc_splits = text_splitter.split_documents([Document(page_content=pdf_text, metadata={\"name\": \"Attention is All You Need\"})])"
+      ],
+      "metadata": {
+        "id": "L4acNR79New2"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "We use Chroma to create a vector store of the document embeddings."
+      ],
+      "metadata": {
+        "id": "0HVNVjSONkj7"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "embedding_model = OpenAIEmbeddings(model=\"text-embedding-ada-002\", openai_api_key=\"Your_openai_api_key\")\n",
+        "\n",
+        "vectorstore = Chroma.from_documents(\n",
+        "    documents=doc_splits,\n",
+        "    collection_name=\"pdf_rag_store\",\n",
+        "    embedding=embedding_model\n",
+        ")"
+      ],
+      "metadata": {
+        "id": "0m1gi_TXNmda"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 10: Retrieval-Augmented Generation (RAG) Setup**\n",
+        "We create a retrieval model to find relevant documents based on user queries."
+      ],
+      "metadata": {
+        "id": "_cwWi8hnNDL3"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "retriever = vectorstore.as_retriever(search_type=\"similarity\", search_kwargs={'k': 1})"
+      ],
+      "metadata": {
+        "id": "IjodFGUTNGlV"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "Define a prompt for the GPT-4o model that integrates retrieved documents:"
+      ],
+      "metadata": {
+        "id": "yE3puelzNGHO"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "system_prompt = \"\"\"You are an assistant for question-answering tasks. Use three-to-five sentences maximum and be concise.\"\"\"\n",
+        "prompt = ChatPromptTemplate.from_messages([\n",
+        "    (\"system\", system_prompt),\n",
+        "    (\"human\", \"Retrieved documents: \\n\\n <docs>{documents}</docs> \\n\\n User question: <question>{question}</question>\")\n",
+        "])"
+      ],
+      "metadata": {
+        "id": "-25TsvEuNQ3p"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "We set up GPT-4o for generating responses:"
+      ],
+      "metadata": {
+        "id": "TaYNJmebNVDH"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "llm = ChatOpenAI(model=\"gpt-4o\", temperature=0, openai_api_key=\"Your_openai_api_key\")\n",
+        "rag_chain = LLMChain(\n",
+        "    prompt=prompt,\n",
+        "    llm=llm,\n",
+        "    output_parser=StrOutputParser()\n",
+        ")"
+      ],
+      "metadata": {
+        "id": "BEsUdoBsNXbt"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Step 11: Query the System**\n",
+        "We can now query the system and generate a response based on the embedded document."
+      ],
+      "metadata": {
+        "id": "f4sclbHqM3lU"
+      }
+    },
+    {
+      "cell_type": "code",
+      "source": [
+        "query = \"What is the BLEU score of the Transformer (base model)?\"\n",
+        "docs = retriever.invoke(query)\n",
+        "\n",
+        "generation = rag_chain.run({\n",
+        "    \"documents\": docs[0].page_content,\n",
+        "    \"question\": query\n",
+        "})\n",
+        "\n",
+        "print(generation)"
+      ],
+      "metadata": {
+        "id": "BowLkWkIM6p7"
+      },
+      "execution_count": null,
+      "outputs": []
+    },
+    {
+      "cell_type": "markdown",
+      "source": [
+        "### **Conclusion**\n",
+        "In this tutorial, we built an end-to-end RAG pipeline that extracts text from PDFs, processes it with OCR, and uses GPT-4o for summarization and query-answering. We also demonstrated how to leverage Chroma and LangChain for document retrieval and embeddings."
+      ],
+      "metadata": {
+        "id": "Qc4E8SoOMzch"
+      }
+    }
+  ]
+}
